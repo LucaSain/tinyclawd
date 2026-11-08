@@ -15,8 +15,16 @@
 #include "store.h"
 #include "touch.h"
 
+// the XIAO kits come with the 0.96" SSD1306 (128 columns from 0). `hw chip 0` for an SH1106
+static sh1106::Conf xiao_screen() {
+    sh1106::Conf c;
+    c.ssd1306 = true;
+    c.offset = 0;
+    return c;
+}
+
 struct Settings {
-    sh1106::Conf screen;
+    sh1106::Conf screen = xiao_screen();
     uint32_t double_ms = 280;
     uint32_t long_ms = 700;
 };
@@ -45,12 +53,13 @@ void hw::load() {
         // same ranges as the hw lines, so a bad record can't leave the screen dark
         if (sv.version == store::VERSION && sv.offset <= 4 && sv.flip <= 1 && sv.mirror <= 1 &&
             sv.khz >= 100 && sv.khz <= 1000 && sv.double_ms >= 100 && sv.double_ms <= 1000 &&
-            sv.long_ms >= 300 && sv.long_ms <= 3000) {
+            sv.long_ms >= 300 && sv.long_ms <= 3000 && sv.chip <= 1) {
             s_set.screen.offset = sv.offset;
             s_set.screen.flip = sv.flip;
             s_set.screen.mirror = sv.mirror;
             s_set.screen.contrast = sv.contrast;
             s_set.screen.hz = sv.khz * 1000;
+            s_set.screen.ssd1306 = sv.chip == 1;
             s_set.double_ms = sv.double_ms;
             s_set.long_ms = sv.long_ms;
         }
@@ -87,6 +96,7 @@ static bool save() {
     d.khz = (uint16_t)(s_set.screen.hz / 1000);
     d.double_ms = (uint16_t)s_set.double_ms;
     d.long_ms = (uint16_t)s_set.long_ms;
+    d.chip = s_set.screen.ssd1306;
     if (!store::save(d)) return false;
     s_saved = d;
     return true;
@@ -94,10 +104,10 @@ static bool save() {
 
 static void show(char* reply, int len, bool restarting = false) {
     const sh1106::Conf& c = s_set.screen;
-    snprintf(reply, len, "ok offset=%d flip=%d mirror=%d contrast=%d i2c=%lu double=%lu long=%lu test=%d screen=%s",
+    snprintf(reply, len, "ok offset=%d flip=%d mirror=%d contrast=%d i2c=%lu double=%lu long=%lu test=%d screen=%s chip=%s",
              c.offset, c.flip, c.mirror, c.contrast, (unsigned long)(c.hz / 1000),
              (unsigned long)s_set.double_ms, (unsigned long)s_set.long_ms, s_test,
-             sh1106::ok() ? "ok" : (restarting ? "restarting" : "missing"));
+             sh1106::ok() ? "ok" : (restarting ? "restarting" : "missing"), c.ssd1306 ? "ssd1306" : "sh1106");
 }
 
 // the rp2040's own temperature sensor on adc input 4
@@ -202,6 +212,9 @@ bool hw::line(char* line, char* reply, int len) {
         } else if (!strcmp(key, "mirror")) {
             if (!num(arg, 0, 1, &v, reply, len)) return true;
             c.mirror = v;
+        } else if (!strcmp(key, "chip")) {   // 0 = SH1106, 1 = SSD1306
+            if (!num(arg, 0, 1, &v, reply, len)) return true;
+            c.ssd1306 = v;
         } else if (!strcmp(key, "contrast")) {
             if (!num(arg, 0, 255, &v, reply, len)) return true;
             c.contrast = v;

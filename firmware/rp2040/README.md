@@ -40,6 +40,9 @@ stty -F /dev/ttyACM0 1200
 | touch (TTP223, high while touched) | D0 | 26 |
 | OLED / touch power | 3V3, GND | |
 
+the default screen is the 0.96" SSD1306 (`chip=ssd1306`, `offset=0`). for a 1.3" SH1106:
+`hw chip 0`, `hw offset 2`, `hw save`. a detected screen that stays black is the wrong chip.
+
 change `PIN` in `touch.cpp` or `PIN_SDA` / `PIN_SCL` in `sh1106.cpp` if you wire it differently
 (the i2c pins have to be an i2c1 pair, or switch `BUS` to `i2c0`).
 

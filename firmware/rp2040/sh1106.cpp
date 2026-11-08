@@ -1,4 +1,4 @@
-// SH1106 over the rp2040 i2c block. same behaviour as main/sh1106.cpp: only changed pages
+// SH1106 or SSD1306 (hw chip) over the rp2040 i2c block. same behaviour as main/sh1106.cpp: only changed pages
 // go out, a missing screen or a bus glitch never blocks for long, it retries every second.
 #include "sh1106.h"
 
@@ -57,7 +57,37 @@ static void bus_setup() {
     s_bus = true;
 }
 
+static bool init_ssd1306() {
+    // the 0.96" panels: like the SH1106 but the charge pump has to be switched on, or it
+    // stays black. page addressing works the same, the 128 columns start at ram column 0
+    const uint8_t seq[] = {
+        0xAE,        // display off
+        0xD5, 0x80,  // clock divide / osc
+        0xA8, 0x3F,  // multiplex 64
+        0xD3, 0x00,  // display offset 0
+        0x40,        // start line 0
+        0x8D, 0x14,  // charge pump on
+        0x20, 0x02,  // page addressing
+        (uint8_t)(s_conf.mirror != s_conf.flip ? 0xA0 : 0xA1),  // segment remap
+        (uint8_t)(s_conf.flip ? 0xC0 : 0xC8),                   // com scan direction
+        0xDA, 0x12,  // com pins
+        0x81, s_conf.contrast,
+        0xD9, 0xF1,  // pre-charge
+        0xDB, 0x40,  // vcomh
+        0xA4,        // show ram
+        0xA6,        // not inverted
+    };
+    return cmds(seq, sizeof(seq));
+}
+
 static bool init_seq() {
+    if (s_conf.ssd1306) {
+        if (!init_ssd1306()) return false;
+        s_ready = true;
+        s_full = true;
+        s_need_on = true;
+        return true;
+    }
     // same sequence as the old mochi oled.c, it is proven on this panel
     const uint8_t seq[] = {
         0xAE,        // display off

@@ -14,6 +14,7 @@ struct Conf {
     bool mirror = false;          // swap left and right
     uint8_t contrast = 0xCF;
     uint32_t hz = 400000;         // i2c clock
+    bool ssd1306 = false;         // 0.96" SSD1306 instead (rp2040 build only, see rp2040/README.md)
 };
 
 void configure(const Conf& c);    // call before init, or any time later (applies live)

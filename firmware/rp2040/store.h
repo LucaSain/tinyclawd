@@ -14,6 +14,7 @@ struct Data {
     uint8_t version, offset, flip, mirror, contrast;
     uint16_t khz, double_ms, long_ms;
     int32_t best[GAMES];   // game high scores by game index
+    uint8_t chip;          // 0 = SH1106, 1 = SSD1306
 };
 
 bool load(Data* out);         // false if nothing was saved yet
