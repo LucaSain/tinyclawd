@@ -120,12 +120,12 @@ extras() {
     offer_packages "them" "${missing[@]}" || note "fine without them, those features just stay off"
 }
 
-# the board's port: TINYCLAWD_PORT, else the espressif usb device. other serial devices are
+# the board's port: TINYCLAWD_PORT, else the espressif usb device (or the rp2040 build, named tinyclawd). other serial devices are
 # never guessed, so a flight controller or an arduino is safe
 find_port() {
     if [ -n "$TINYCLAWD_PORT" ]; then echo "$TINYCLAWD_PORT"; return; fi
     local p
-    for p in /dev/serial/by-id/*Espressif* /dev/serial/by-id/*303a*; do
+    for p in /dev/serial/by-id/*Espressif* /dev/serial/by-id/*303a* /dev/serial/by-id/usb-tinyclawd_*; do
         [ -e "$p" ] && { readlink -f "$p"; return; }
     done
 }

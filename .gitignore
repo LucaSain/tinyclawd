@@ -15,6 +15,9 @@ firmware/dependencies.lock
 .cache/
 .vscode/
 
+# rp2040 build
+firmware/rp2040/build/
+
 # simulator
 firmware/sim/build/
 firmware/sim/sim

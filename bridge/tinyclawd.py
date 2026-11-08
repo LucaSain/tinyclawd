@@ -27,6 +27,7 @@ import time
 PROTO = 1
 MAX_LINE = 120
 ESPRESSIF_VID = 0x303A
+RPI_VID = 0x2E8A        # the xiao rp2040 build, only with the "tinyclawd" product name
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEMO_FILE = os.path.join(HERE, "..", "firmware", "sim", "scripts", "demo.txt")
 
@@ -436,8 +437,9 @@ def cmd_statusline(args):
 # ---------------------------------------------------------------- serial link
 
 def find_port():
-    """the pet's port by its espressif usb id. other serial devices (a flight controller, an
-    arduino) are never opened, use --port or TINYCLAWD_PORT for anything unusual"""
+    """the pet's port by its espressif usb id, or a raspberry pi id named "tinyclawd" (the
+    rp2040 build). other serial devices (a flight controller, an arduino, a plain pico) are
+    never opened, use --port or TINYCLAWD_PORT for anything unusual"""
     if os.environ.get("TINYCLAWD_PORT"):
         return os.environ["TINYCLAWD_PORT"]
     try:
@@ -446,7 +448,8 @@ def find_port():
     except Exception:
         ports = None
     if ports is not None:
-        return next((p.device for p in ports if p.vid == ESPRESSIF_VID), None)
+        return next((p.device for p in ports if p.vid == ESPRESSIF_VID or
+                     (p.vid == RPI_VID and p.product == "tinyclawd")), None)
     acm = sorted(glob.glob("/dev/ttyACM*"))   # no usb info at all, best guess
     return acm[0] if acm else None
 
