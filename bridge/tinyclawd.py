@@ -432,17 +432,32 @@ def cmd_usage(args):
     os._exit(0)
 
 
-def statusline_text(d):
-    """'ctx 37% · 5h 42% · week 18%', only the parts claude code sent"""
+def time_left(mins):
+    """135 -> '2h 15m', 4500 -> '3d 3h'"""
+    if mins < 60:
+        return "%dm" % mins
+    if mins < 24 * 60:
+        return "%dh %dm" % (mins // 60, mins % 60)
+    return "%dd %dh" % (mins // (24 * 60), mins % (24 * 60) // 60)
+
+
+def statusline_text(d, now=None):
+    """'Context: 37% · Session Usage: 42% (resets in 2h 15m) · Weekly Usage: 18% (resets in 3d 3h)',
+    only the parts claude code sent. all of them are used, not left"""
     parts = []
     for name, keys in (
-        ("ctx", ("context_window", "used_percentage")),
-        ("5h", ("rate_limits", "five_hour", "used_percentage")),
-        ("week", ("rate_limits", "seven_day", "used_percentage")),
+        ("Context", ("context_window",)),
+        ("Session Usage", ("rate_limits", "five_hour")),
+        ("Weekly Usage", ("rate_limits", "seven_day")),
     ):
-        v = as_num(dig(d, *keys))
-        if v is not None:
-            parts.append("%s %d%%" % (name, max(0, min(100, round(v)))))
+        v = as_num(dig(d, *(keys + ("used_percentage",))))
+        if v is None:
+            continue
+        text = "%s: %d%%" % (name, max(0, min(100, round(v))))
+        left = reset_minutes(dig(d, *(keys + ("resets_at",))), now)
+        if left:   # 0 = already reset, or about to
+            text += " (resets in %s)" % time_left(left)
+        parts.append(text)
     return " · ".join(parts)
 
 

@@ -216,11 +216,18 @@ class Usage(unittest.TestCase):
         d = {"rate_limits": {"five_hour": {"used_percentage": 41.6, "resets_at": 99999},
                              "seven_day": {"used_percentage": 18}},
              "context_window": {"used_percentage": 37.2}, "model": {"display_name": "Opus"}}
-        self.assertEqual(tc.statusline_text(d), "ctx 37% · 5h 42% · week 18%")
+        self.assertEqual(tc.statusline_text(d), "Context: 37% · Session Usage: 42% · Weekly Usage: 18%")
+        d["rate_limits"]["five_hour"]["resets_at"] = 1000 + 135 * 60
+        d["rate_limits"]["seven_day"]["resets_at"] = 1000 + 4500 * 60
+        self.assertEqual(tc.statusline_text(d, now=1000),
+                         "Context: 37% · Session Usage: 42% (resets in 2h 15m) · "
+                         "Weekly Usage: 18% (resets in 3d 3h)")
+        d["rate_limits"]["five_hour"]["resets_at"] = 1000 + 40 * 60
+        self.assertIn("(resets in 40m)", tc.statusline_text(d, now=1000))
         # api key login: no rate_limits, only the context window
-        self.assertEqual(tc.statusline_text({"context_window": {"used_percentage": 5}}), "ctx 5%")
+        self.assertEqual(tc.statusline_text({"context_window": {"used_percentage": 5}}), "Context: 5%")
         self.assertEqual(tc.statusline_text({"rate_limits": {"five_hour": {"used_percentage": 120}}}),
-                         "5h 100%")
+                         "Session Usage: 100%")
         self.assertEqual(tc.statusline_text({"rate_limits": None, "context_window": {}}), "")
         self.assertEqual(tc.statusline_text({}), "")
 
@@ -229,7 +236,7 @@ class Usage(unittest.TestCase):
         d = {"rate_limits": {"five_hour": {"used_percentage": 42}},
              "context_window": {"used_percentage": 37}}
         nowhere = os.path.join(tempfile.mkdtemp(), "none.sock")
-        for stdin, want in ((json.dumps(d), "ctx 37% · 5h 42%\n"), ("{}", "\n"), ("not json", "")):
+        for stdin, want in ((json.dumps(d), "Context: 37% · Session Usage: 42%\n"), ("{}", "\n"), ("not json", "")):
             t = time.time()
             p = subprocess.run([sys.executable, os.path.join(HERE, "tinyclawd.py"), "--sock", nowhere,
                                 "statusline"], input=stdin.encode(), capture_output=True, timeout=10)

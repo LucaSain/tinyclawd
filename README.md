@@ -207,7 +207,8 @@ or build it yourself with esp-idf, see [`firmware/`](firmware).
 - `/clawd` in claude code shows your usage on the pet, `/clawd context` the context window. it
   never reaches claude, so it costs nothing
 - usage comes from claude code's status line. no status line yet: it asks if you want a visible
-  one (`ctx 37% · 5h 42% · week 18%` at the bottom of claude code), a hidden one that only feeds
+  one (`Context: 37% · Session Usage: 42% (resets in 2h 15m) · Weekly Usage: 18% (resets in 3d 3h)`
+  at the bottom of claude code, % used), a hidden one that only feeds
   the pet, or none. `--statusline visible|hidden|none` (or `TINYCLAWD_STATUSLINE` for install.sh)
   answers it ahead of time. a shell script that reads stdin with `input=$(cat)`:
   it adds one line after that. anything else: it prints the line for you to add. the 5 hour and

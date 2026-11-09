@@ -32,7 +32,8 @@ python3 setup.py --remove    # undo all of it
   are, only entries that run `tinyclawd.py` are touched. running it again fixes the paths, for
   example after you moved the folder. `install_hooks.py` does only this part
 - usage: with no status line it asks (in a terminal) or takes `--statusline`. visible =
-  `tinyclawd.py statusline`, prints `ctx 37% · 5h 42% · week 18%` with the parts claude code sends.
+  `tinyclawd.py statusline`, prints `Context: 37% · Session Usage: 42% (resets in 2h 15m) · Weekly Usage: 18% (resets in 3d 3h)`
+  with the parts claude code sends, all in % used.
   hidden = `tinyclawd.py usage`, prints nothing. none = nothing, it prints how to add one later.
   no terminal and no flag counts as none. with a shell script status line it adds this after the
   line that reads stdin (`input=$(cat)`):

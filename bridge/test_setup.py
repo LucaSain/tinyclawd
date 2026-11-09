@@ -221,7 +221,7 @@ class Question(unittest.TestCase):
     def test_text(self):
         text = self.ask("\n")[1]
         self.assertTrue(text.startswith("you have no Claude Code status line. tiny clawd reads your usage from it.\n"))
-        self.assertIn("  1. add a visible one: shows ctx, 5h and week usage at the bottom of Claude Code, "
+        self.assertIn("  1. add a visible one: shows context, session and weekly usage at the bottom of Claude Code, "
                       "and feeds Clawd\n", text)
         self.assertIn("  2. add a hidden one: shows nothing, only feeds Clawd\n", text)
         self.assertIn("  3. skip: Clawd won't show usage (add it later with: python3 ", text)
@@ -317,7 +317,7 @@ class SetupInAFakeHome(unittest.TestCase):
         self.assertIn("would add a status line that shows", out)
         self.assertEqual(h.files(), set())
         out = h.run("--statusline", "visible").stdout
-        self.assertIn("added a status line that shows ctx, 5h and week", out)
+        self.assertIn("added a status line that shows context, session and weekly", out)
         cmd = h.read_settings()["statusLine"]["command"]
         self.assertTrue(cmd.endswith("tinyclawd.py' statusline") or cmd.endswith("tinyclawd.py statusline"))
         self.assertEqual(setup.our_kind(cmd), "visible")
