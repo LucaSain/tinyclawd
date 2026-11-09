@@ -34,6 +34,7 @@ static const uint32_t WAIT_ROTATE_MS = 9000;
 static const uint32_t STALE_MS = 10 * 60000;   // no events for this long while busy = we missed a hook
 static const uint32_t SESSION_MS = 15 * 60000;
 static const uint32_t TAP_WINDOW = 4000;
+static const uint32_t MODE_MS = 2500;            // a permission mode change stays up this long
 static const uint32_t TYPING_STALE_MS = 12000;   // the laptop resends every 5 s while you type
 static const uint32_t BREAK_MIN_MS = 25000;      // a little break while claude works, every 25-45 s
 static const uint32_t BREAK_MAX_MS = 45000;
@@ -248,6 +249,9 @@ struct Brain::Impl {
     uint32_t next_song = 0;        // next equalizer break while claude works and music plays
     uint32_t until = 0;            // a one-shot that ends early, 0 = when the animation ends
     uint32_t typing_at = 0;        // last typing line
+    bool away = false;             // the laptop screen is locked
+    char mode_label[17] = "";      // permission mode, shown at the top for MODE_MS
+    uint32_t mode_at = 0;          // when it changed, 0 = not showing
     Canvas a, b;   // scratch for transitions
 
     uint32_t rand() {
@@ -621,6 +625,10 @@ struct Brain::Impl {
             next_micro = now + gap();
             return;
         }
+        if (away) {   // nobody is looking
+            fall_asleep(now);
+            return;
+        }
         uint32_t quiet = music ? 0 : now - last_activity;   // music is company
         // usage limit reached: show it now and then
         if (pct5h >= 100 && !before(now, next_micro) && rand() % 3 == 0) {
@@ -629,11 +637,7 @@ struct Brain::Impl {
             return;
         }
         if (quiet > timing->sleep) {
-            mode = SLEEP_M;
-            base = find_anim("asleep");
-            base_pool = SLEEPING;
-            show(find_anim("sleepy"), now, true);
-            next_micro = now + 30000;
+            fall_asleep(now);
             return;
         }
         if (before(now, next_micro)) return;
@@ -651,6 +655,14 @@ struct Brain::Impl {
         if (session && done + bugs > 0 && rand() % 12 == 0) name = "scoreboard";
         play_name(name, now);
         next_micro = now + gap();
+    }
+
+    void fall_asleep(uint32_t now) {
+        mode = SLEEP_M;
+        base = find_anim("asleep");
+        base_pool = SLEEPING;
+        show(find_anim("sleepy"), now, true);
+        next_micro = now + 30000;
     }
 
     uint32_t rotate_every() {
@@ -778,6 +790,25 @@ struct Brain::Impl {
             if ((step * 7 + k * 3) % 5 < 2) c.fill_rect(x, 59, x + 1, 61);   // pressed
             else c.px(x, 60);
         }
+    }
+
+    // the permission mode in a small tab at the top: slides down, stays, slides back up
+    void mode_sign(Canvas& c, uint32_t now) {
+        if (!mode_at) return;
+        uint32_t t = now - mode_at;
+        if (t >= MODE_MS) {
+            mode_at = 0;
+            return;
+        }
+        const uint32_t SLIDE = 150;
+        uint32_t edge = t < SLIDE ? t : (t > MODE_MS - SLIDE ? MODE_MS - t : SLIDE);
+        int h = 10;
+        int y = -h + iround(h * ease(edge / (float)SLIDE));
+        int w = c.text_width(mode_label, font_4x6) + 7;
+        int x = 64 - w / 2;
+        c.fill_rect(x - 1, y, x + w, y + h, false);   // a dark edge so it reads on any frame
+        c.fill_rect(x, y, x + w - 1, y + h - 1);
+        c.text(x + 4, y + 2, mode_label, font_4x6, false);
     }
 
     void render_and_remember(Canvas& out, uint32_t now) {
@@ -1022,6 +1053,7 @@ void Brain::music(bool on, const char* title, uint32_t now) {
         if (s.mode == IDLE_M) s.idle_base(now);
         return;
     }
+    if (s.away) return;   // a song does not wake it up while you are away
     s.wake(now);
     if (s.mode != IDLE_M || s.typing) return;   // claude is busy or you type, the title can wait
     s.react(POOL(NOW_PLAYING), now);
@@ -1042,6 +1074,24 @@ void Brain::clock(int hour, int minute, uint32_t now) {
 
 void Brain::sessions(int n) { p->sessions = n < 0 ? 0 : n; }
 
+void Brain::away(bool on, uint32_t now) {
+    Impl& s = *p;
+    if (on == s.away) return;
+    s.away = on;
+    if (on) return;   // idle_tick puts it to sleep once nothing else plays
+    s.activity(now);
+    s.wake(now);
+}
+
+void Brain::mode(const char* label, uint32_t now) {
+    Impl& s = *p;
+    int n = 0;
+    for (const char* c = label; *c && n < (int)sizeof(s.mode_label) - 1; c++)
+        s.mode_label[n++] = (*c >= 'a' && *c <= 'z') ? *c - 32 : *c;
+    s.mode_label[n] = 0;
+    s.mode_at = n ? (now ? now : 1) : 0;
+}
+
 void Brain::tune(bool fast) { p->fast = fast; }
 
 void Brain::play(const char* name, uint32_t now) {
@@ -1058,6 +1108,7 @@ void Brain::render(Canvas& c, uint32_t now) {
         p->session_dots(c);
         p->music_sign(c, now);
         p->typing_sign(c, now);
+        p->mode_sign(c, now);
     }
     menu::ring(c, now);
 }

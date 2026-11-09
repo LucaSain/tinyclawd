@@ -116,7 +116,7 @@ def later_cmd():
 
 
 QUESTION = """you have no Claude Code status line. tiny clawd reads your usage from it.
-  1. add a visible one: shows ctx, 5h and week usage at the bottom of Claude Code, and feeds Clawd
+  1. add a visible one: shows context, session and weekly usage at the bottom of Claude Code, and feeds Clawd
   2. add a hidden one: shows nothing, only feeds Clawd
   3. skip: Clawd won't show usage (add it later with: %s)
 """
@@ -203,7 +203,7 @@ def status_line(settings, remove, dry, want=None):
     cmd = sl.get("command") if isinstance(sl, dict) else None
     def did(now, later):
         return later if dry else now
-    what = {"visible": "a status line that shows ctx, 5h and week usage and feeds Clawd",
+    what = {"visible": "a status line that shows context, session and weekly usage and feeds Clawd",
             "hidden": "a hidden status line that only feeds Clawd (it shows nothing)"}
     if not isinstance(cmd, str) or not cmd.strip():
         if remove:

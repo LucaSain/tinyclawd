@@ -1,0 +1,71 @@
+# builds both firmwares. on a v* tag they go into that github release, where install.sh
+# finds them: tinyclawd-esp32c3-<tag>.bin (flash at 0x0) and tinyclawd-xiao-rp2040-<tag>.uf2
+name: firmware
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths: ["firmware/**", ".github/workflows/firmware.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
+
+jobs:
+  rp2040:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: pico-sdk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            libstdc++-arm-none-eabi-newlib ninja-build
+          git clone --depth 1 --branch 2.1.1 https://github.com/raspberrypi/pico-sdk "$HOME/pico-sdk"
+          git -C "$HOME/pico-sdk" submodule update --init --depth 1 lib/tinyusb
+      - name: build
+        run: |
+          cmake -S firmware/rp2040 -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DPICO_SDK_PATH="$HOME/pico-sdk"
+          cmake --build build
+          cp build/tinyclawd.uf2 "tinyclawd-xiao-rp2040-$VERSION.uf2"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rp2040
+          path: tinyclawd-xiao-rp2040-*.uf2
+
+  esp32c3:
+    runs-on: ubuntu-24.04
+    container: espressif/idf:v5.4.2
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          idf.py -C firmware build
+          # one image with bootloader, partitions and app, flashed at 0x0
+          (cd firmware/build && esptool.py --chip esp32c3 merge_bin -o "$GITHUB_WORKSPACE/tinyclawd-esp32c3-$VERSION.bin" @flash_args)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32c3
+          path: tinyclawd-esp32c3-*.bin
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rp2040, esp32c3]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$VERSION" >/dev/null 2>&1 || gh release create "$VERSION" --title "$VERSION" --notes "see CHANGELOG.md"
+          gh release upload "$VERSION" tinyclawd-*.bin tinyclawd-*.uf2 --clobber

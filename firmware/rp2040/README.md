@@ -21,7 +21,15 @@ the first configure also fetches and builds `picotool` (the sdk needs it to make
 
 ## flash
 
-hold **B** (boot) on the XIAO while plugging it in. it shows up as a drive called `RPI-RP2`,
+the bridge does it without a button: it opens the port at 1200 baud (the board reboots into its
+`RPI-RP2` usb drive), mounts the drive through udisks and copies the file. `install.sh` does the
+same with the `.uf2` from the latest release.
+
+```bash
+python3 bridge/tinyclawd.py flash firmware/rp2040/build/tinyclawd.uf2
+```
+
+by hand: hold **B** (boot) on the XIAO while plugging it in. it shows up as a drive called `RPI-RP2`,
 copy `build/tinyclawd.uf2` onto it and it reboots into the pet.
 
 once the pet is running you don't need the button again: opening the port at 1200 baud
@@ -30,6 +38,12 @@ reboots it into the `RPI-RP2` drive:
 ```bash
 stty -F /dev/ttyACM0 1200
 ```
+
+## releases
+
+`.github/workflows/firmware.yml` builds this and the esp32c3 image on every pull request that
+touches `firmware/`. pushing a `v*` tag puts `tinyclawd-xiao-rp2040-<tag>.uf2` and
+`tinyclawd-esp32c3-<tag>.bin` into that github release, where `install.sh` looks.
 
 ## pins
 

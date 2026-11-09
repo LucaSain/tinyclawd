@@ -32,7 +32,8 @@ python3 setup.py --remove    # undo all of it
   are, only entries that run `tinyclawd.py` are touched. running it again fixes the paths, for
   example after you moved the folder. `install_hooks.py` does only this part
 - usage: with no status line it asks (in a terminal) or takes `--statusline`. visible =
-  `tinyclawd.py statusline`, prints `ctx 37% · 5h 42% · week 18%` with the parts claude code sends.
+  `tinyclawd.py statusline`, prints `Context: 37% · Session Usage: 42% (resets in 2h 15m) · Weekly Usage: 18% (resets in 3d 3h)`
+  with the parts claude code sends, all in % used.
   hidden = `tinyclawd.py usage`, prints nothing. none = nothing, it prints how to add one later.
   no terminal and no flag counts as none. with a shell script status line it adds this after the
   line that reads stdin (`input=$(cat)`):
@@ -58,6 +59,8 @@ python3 tinyclawd.py daemon --stdout        # no board, prints what it would sen
 python3 tinyclawd.py daemon --no-keys       # do not watch the keyboard
 python3 tinyclawd.py send ev perm           # one raw line through the daemon
 python3 tinyclawd.py console                # type lines straight to the pet, see its answers
+python3 tinyclawd.py focus                  # the terminal of the session waiting for you comes up
+python3 tinyclawd.py flash fw.uf2           # flash the xiao rp2040 build, no button needed
 python3 tinyclawd.py replay                 # plays ../firmware/sim/scripts/demo.txt
 python3 tinyclawd.py replay my.txt --speed 2 --loop --to serial
 ```
@@ -85,6 +88,27 @@ so stop the daemon first. session files are one line per entry, `<ms> <line>` fr
 - watches how fast you type, so the pet can look at the keyboard while you write a prompt.
   see below
 - while music mode is on it also drives the equalizer, see below
+- asks logind every 2 s if the screen is locked (`LockedHint`) and sends `away 1` / `away 0`.
+  off with `TINYCLAWD_NO_AWAY=1`
+- sends `mode <label>` when a session's permission mode changes (shift+tab), or when a session
+  starts in a mode other than normal
+- a `touch tap` from the pet, or `tinyclawd.py focus`, while a session waits for you brings that
+  session's terminal to the front, see below
+
+## showing the waiting session
+
+every hook also sends the pids of claude and the processes above it (shell, terminal). when a
+session waits for you, a tap on the pet (or `tinyclawd.py focus`, e.g. on a keyboard shortcut)
+looks for a window owned by one of them and activates it. again within 15 s: the next waiting
+session.
+
+- kde, wayland or x11: a one-off kwin script over dbus (`gdbus`). in konsole it also switches to
+  the right tab
+- other x11 desktops: `xdotool`
+- gnome on wayland and the rest: no way to raise a window from outside, the tap is just a tap
+
+a terminal multiplexer (tmux, zellij) or another terminal's tabs: the window comes up, the tab
+stays where it was.
 
 ## typing
 
@@ -141,6 +165,8 @@ the capture only runs while the music watcher says something plays, and stops wi
 | PreToolUse | `ev tool <tool_name>`, `AskUserQuestion` / `ExitPlanMode` give `ev perm` |
 | PreToolUse, Bash | the command picks the look: `Grep` (grep, rg, find), `Read` (cat, ls, sed -n), `Build` (make, idf.py, cargo build), `Test`, `Git`, `Install` (pip, apt, npm install), `WebFetch` (curl, wget), else `Bash` |
 | PermissionRequest | `ev perm` |
+| PermissionDenied (auto mode said no) | `ev toolfail <tool_name>` |
+| any hook with `permission_mode` | `mode <label>` when it changed (normal mode, accept edits, plan mode, auto mode, dont ask, bypass perms) |
 | Notification `permission_prompt`, `elicitation_dialog`, `agent_needs_input`... | `ev perm` |
 | PostToolUse, Bash test command | `ev test pass` (or `fail` if the output says so, e.g. piped into tail) |
 | PostToolUse, Bash `git commit` with a `[branch hash]` line | `ev commit` |

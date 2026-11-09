@@ -30,6 +30,10 @@ idf.py -C firmware build
 idf.py -C firmware -p /dev/ttyACM0 flash monitor
 ```
 
+releases: `.github/workflows/firmware.yml` builds the esp32c3 `.bin` and the rp2040 `.uf2` on pull
+requests and attaches both to the github release of a `v*` tag. `install.sh` picks the file that
+matches the plugged in board.
+
 keep the pet engine (state + animations) free of esp-idf headers so it also builds on the desktop
 simulator and can be tested without the board. both builds use C++17 (gnu++2b clashes with our
 `lerp`).
