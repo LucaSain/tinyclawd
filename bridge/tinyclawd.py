@@ -18,7 +18,9 @@ import re
 import select
 import shlex
 import signal
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -1047,6 +1049,112 @@ class Music:
 # privacy: we only count that a key went down. which key it was is never read,
 # kept, logged or sent, only "typing <keys per second>" leaves this file.
 # turn it off with TINYCLAWD_NO_KEYS=1 or daemon --no-keys.
+#
+# two sources: the keyboards in /dev/input (any session, wayland too, needs the
+# input group) and xinput (x11 only, no group needed).
+
+class NoKeys(Exception):
+    """no way to watch the keyboard, the message says why"""
+
+
+SYS_INPUT = "/sys/class/input"
+DEV_INPUT = "/dev/input"
+EV_KEY = 1
+LETTERS = range(16, 26)   # KEY_Q .. KEY_P
+BTN_LEFT = 0x110
+INPUT_EVENT = struct.Struct("llHHi")   # struct input_event: sec, usec, type, code, value
+LONG_BITS = 8 * struct.calcsize("l")
+NO_INPUT = ("no access to the keyboard in %s, join the input group: "
+            "sudo usermod -aG input $USER, then log out and in" % DEV_INPUT)
+
+
+def caps(path):
+    """a sysfs capability bitmask (hex words, highest first) as one int"""
+    try:
+        with open(path) as f:
+            words = f.read().split()
+    except OSError:
+        return 0
+    bits = 0
+    for w in words:
+        bits = (bits << LONG_BITS) | int(w, 16)
+    return bits
+
+
+def evdev_keyboards(sys_dir=SYS_INPUT):
+    """event devices with letter keys and no mouse buttons, picked by what they can
+    send, so mice and combo devices are never opened"""
+    found = []
+    for name in sorted(os.listdir(sys_dir) if os.path.isdir(sys_dir) else []):
+        if not name.startswith("event"):
+            continue
+        dev = os.path.join(sys_dir, name, "device", "capabilities")
+        keys = caps(os.path.join(dev, "key"))
+        if (caps(os.path.join(dev, "ev")) >> EV_KEY & 1
+                and all(keys >> k & 1 for k in LETTERS) and not keys >> BTN_LEFT & 1):
+            found.append(name)
+    return found
+
+
+def evdev_readable(sys_dir=SYS_INPUT, dev_dir=DEV_INPUT):
+    for name in evdev_keyboards(sys_dir):
+        try:
+            os.close(os.open(os.path.join(dev_dir, name), os.O_RDONLY | os.O_NONBLOCK))
+            return True
+        except OSError:
+            pass
+    return False
+
+
+def evdev_keys(on_press, stop=lambda: False, sys_dir=SYS_INPUT, dev_dir=DEV_INPUT, rescan=5.0):
+    """reads every keyboard in /dev/input and calls on_press() for every key going down.
+    looks for new keyboards every few seconds. raises NoKeys when there are keyboards
+    but none can be opened"""
+    fds = {}   # fd -> event name
+    next_scan = 0.0
+    try:
+        while not stop():
+            now = time.monotonic()
+            if now >= next_scan:
+                next_scan = now + rescan
+                denied = False
+                for name in evdev_keyboards(sys_dir):
+                    if name in fds.values():
+                        continue
+                    try:
+                        fd = os.open(os.path.join(dev_dir, name), os.O_RDONLY | os.O_NONBLOCK)
+                    except PermissionError:
+                        denied = True
+                        continue
+                    except OSError:
+                        continue
+                    fds[fd] = name
+                if denied and not fds:
+                    raise NoKeys(NO_INPUT)
+            if not fds:
+                time.sleep(1.0)
+                continue
+            ready, _, _ = select.select(list(fds), [], [], 1.0)
+            for fd in ready:
+                try:
+                    data = os.read(fd, INPUT_EVENT.size * 64)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    data = b""
+                if not data:   # unplugged
+                    os.close(fd)
+                    del fds[fd]
+                    continue
+                for off in range(0, len(data) - INPUT_EVENT.size + 1, INPUT_EVENT.size):
+                    # the code field (which key) is skipped. value 1 = down, 2 = repeat
+                    _, _, kind, _, value = INPUT_EVENT.unpack_from(data, off)
+                    if kind == EV_KEY and value == 1:
+                        on_press()
+    finally:
+        for fd in fds:
+            os.close(fd)
+
 
 def xinput_keys(on_press):
     """runs xinput until it exits and calls on_press() for every key press.
@@ -1092,12 +1200,14 @@ class Keys:
     TICK = 0.25
     DISPLAY_WAIT = 600   # look for the desktop this long after start
 
-    def __init__(self, out, source=xinput_keys, env=None):
+    def __init__(self, out, source=None, env=None):
         self.out = out          # function(line)
-        self.source = source    # function(on_press), blocks while it runs
+        self.source = source    # function(on_press), blocks while it runs. None = pick()
         self.env = os.environ if env is None else env
         # only the real environment is filled in from systemd (xinput inherits it)
         self.find_session = session_env if env is None else None
+        self.can_evdev = evdev_readable
+        self.has_xinput = lambda: shutil.which("xinput") is not None
         self.times = []         # when keys went down, nothing else
         self.lock = threading.Lock()
         self.rate = 0           # what the pet was told
@@ -1110,11 +1220,21 @@ class Keys:
             return "turned off"
         if self.env.get("TINYCLAWD_NO_KEYS", "") not in ("", "0"):
             return "TINYCLAWD_NO_KEYS is set"
-        if self.env.get("XDG_SESSION_TYPE") == "wayland":
-            return "wayland session"
-        if not self.env.get("DISPLAY"):
-            return "no DISPLAY"
         return None
+
+    def pick(self):
+        """/dev/input when a keyboard there can be read, else xinput on x11.
+        raises NoKeys with the reason when neither works"""
+        if self.can_evdev():
+            return evdev_keys
+        self.wait_for_display()
+        if self.env.get("XDG_SESSION_TYPE") == "wayland" or self.env.get("WAYLAND_DISPLAY"):
+            raise NoKeys("wayland session and " + NO_INPUT)
+        if not self.env.get("DISPLAY"):
+            raise NoKeys("no DISPLAY and " + NO_INPUT)
+        if not self.has_xinput():
+            raise NoKeys("xinput not found and " + NO_INPUT)
+        return xinput_keys
 
     def press(self, now=None):
         with self.lock:
@@ -1158,6 +1278,10 @@ class Keys:
                 log("xinput not found, no typing reactions")
                 self.off = True
                 return
+            except NoKeys as e:
+                log("no typing reactions:", e)
+                self.off = True
+                return
             except Exception as e:
                 log("keys:", e)
             if self.stop:
@@ -1167,18 +1291,24 @@ class Keys:
 
     def wait_for_display(self):
         start = time.time()
-        while self.why_off() == "no DISPLAY" and self.find_session and not self.stop:
+        while not self.env.get("DISPLAY") and self.find_session and not self.stop:
             self.find_session(self.env)
-            if self.why_off() != "no DISPLAY" or time.time() - start > self.DISPLAY_WAIT:
+            if self.env.get("DISPLAY") or time.time() - start > self.DISPLAY_WAIT:
                 break
             time.sleep(10)
 
     def loop(self):
-        self.wait_for_display()
         why = self.why_off()
         if why:
             log("typing reactions off:", why)
             return
+        if self.source is None:
+            try:
+                self.source = self.pick()
+            except NoKeys as e:
+                log("typing reactions off:", e)
+                return
+            log("typing reactions from", DEV_INPUT if self.source is evdev_keys else "xinput")
         threading.Thread(target=self.watch, daemon=True).start()
         while not self.stop and not self.off:
             try:
@@ -1194,7 +1324,7 @@ DEVICE_PREFIXES = ("ok", "err", "touch", "boot")
 
 
 class Daemon:
-    def __init__(self, port=None, stdout=False, path=None, player=playerctl, keys=xinput_keys,
+    def __init__(self, port=None, stdout=False, path=None, player=playerctl, keys=None,
                  no_keys=False, audio=None):
         self.path = path or sock_path()
         self.link = Link(port, stdout, self.on_connect, self.on_device)

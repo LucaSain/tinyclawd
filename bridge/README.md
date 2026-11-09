@@ -88,10 +88,19 @@ so stop the daemon first. session files are one line per entry, `<ms> <line>` fr
 
 ## typing
 
-the daemon runs `xinput test-xi2 --root` (x11, no root needed) and counts key presses in every
-window. only the count. the key code lines come through the xinput pipe but are never parsed,
-kept, logged or sent, they are dropped as they come in. the pet only gets `typing <n>`, n = keys per second (1 to 15),
-and `typing 0` after 3 s without keys. at most 2 lines a second, plus the same line every 5 s
+the daemon counts key presses in every window. only the count. it has two ways to see them:
+
+- the keyboards in `/dev/input` (wayland, x11 or a tty). it opens every event device that has
+  letter keys and no mouse buttons, looks for new ones every 5 s, and counts key-down events
+  (repeats and releases are not counted). the key code field is skipped, never read. needs
+  the `input` group: `sudo usermod -aG input $USER`, then log out and in. that group lets
+  every program you run read the keyboard, so it is your call
+- `xinput test-xi2 --root` (x11, no group needed). the key code lines come through the xinput
+  pipe but are never parsed, kept, logged or sent, they are dropped as they come in
+
+`/dev/input` wins when a keyboard there can be opened, else xinput on x11. the daemon logs which
+one it uses (`typing reactions from /dev/input`). the pet only gets `typing <n>`, n = keys per
+second (1 to 15), and `typing 0` after 3 s without keys. at most 2 lines a second, plus the same line every 5 s
 while you keep typing.
 
 turn it off:
@@ -102,9 +111,9 @@ python3 tinyclawd.py daemon --no-keys
 ```
 
 for the service, add `Environment=TINYCLAWD_NO_KEYS=1` under `[Service]` (or `--no-keys` to the
-`ExecStart` line). on wayland, without xinput or without `DISPLAY` it is off on its own, the
-daemon logs why once. the service often starts before the desktop is up, so it asks systemd for
-`DISPLAY` for the first 10 minutes before it gives up.
+`ExecStart` line). with no readable keyboard in `/dev/input` and no x11 xinput it is off on its
+own, the daemon logs why once. the service often starts before the desktop is up, so without
+`/dev/input` access it asks systemd for `DISPLAY` for the first 10 minutes before it gives up.
 
 ## equalizer
 

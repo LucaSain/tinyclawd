@@ -112,7 +112,13 @@ extras() {
     local missing=() names=()
     command -v playerctl >/dev/null || { missing+=("$(pkg playerctl)"); names+=("song names"); }
     command -v parec >/dev/null || { missing+=("$(pkg parec)"); names+=("equalizer"); }
-    command -v xinput >/dev/null || { missing+=("$(pkg xinput)"); names+=("typing"); }
+    if [ "$XDG_SESSION_TYPE" = wayland ] || [ -n "$WAYLAND_DISPLAY" ]; then
+        # typing reads the keyboard from /dev/input there, xinput does not help
+        id -nG | tr ' ' '\n' | grep -qx input \
+            || say "typing reactions on wayland need the input group: sudo usermod -aG input $USER, then log out and in"
+    else
+        command -v xinput >/dev/null || { missing+=("$(pkg xinput)"); names+=("typing"); }
+    fi
     has_py numpy || { missing+=("$(pkg numpy)"); names+=("a better equalizer"); }
     [ ${#missing[@]} -eq 0 ] && return
     local list; list=$(IFS=,; echo "${names[*]}" | sed 's/,/, /g')
