@@ -93,6 +93,20 @@ bool proto_line(Brain& b, char* line, uint32_t now, char* reply, int len) {
         snprintf(reply, len, "ok");
         return true;
     }
+    if (!strcmp(line, "away")) {
+        if ((*rest != '0' && *rest != '1') || rest[1]) {
+            snprintf(reply, len, "err want away 0|1");
+            return false;
+        }
+        b.away(*rest == '1', now);
+        snprintf(reply, len, "ok");
+        return true;
+    }
+    if (!strcmp(line, "mode")) {
+        b.mode(rest, now);
+        snprintf(reply, len, "ok");
+        return true;
+    }
     if (!strcmp(line, "typing")) {
         b.typing(atoi(rest), now);
         snprintf(reply, len, "ok");

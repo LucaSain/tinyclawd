@@ -11,6 +11,7 @@
 # only needs pyserial, and only for the daemon / replay --to serial.
 
 import argparse
+import ast
 import glob
 import json
 import os
@@ -23,6 +24,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -106,6 +108,9 @@ PERM_NOTES = {
     "worker_permission_prompt", "agent_needs_input",
 }
 ASKING_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
+# claude code permission modes -> the label the pet shows when it changes
+MODES = {"default": "normal mode", "acceptEdits": "accept edits", "plan": "plan mode",
+         "auto": "auto mode", "dontAsk": "dont ask", "bypassPermissions": "bypass perms"}
 # slash commands that open a screen on the pet instead of a claude turn
 SCREEN_CMDS = {"usage": "usage", "cost": "usage", "status": "usage", "context": "context"}
 PET_CMD = "clawd"   # our own slash command: /clawd, /clawd context
@@ -248,6 +253,8 @@ def map_hook(d):
         return ["ev tool " + clean(tool_look(d))]
     if ev == "PermissionRequest":
         return ["ev perm"]
+    if ev == "PermissionDenied":   # auto mode said no
+        return ["ev toolfail " + clean(tool)]
     if ev == "Notification":
         if d.get("notification_type") in PERM_NOTES:
             return ["ev perm"]
@@ -291,6 +298,22 @@ def project(cwd):
     return clean(os.path.basename(cwd.rstrip("/")), 16)
 
 
+def parent_pids(pid=None, depth=12):
+    """claude and the processes above it, closest first: [claude, shell, terminal, ...].
+    the daemon looks for a window among them when you tap a waiting pet"""
+    pids = []
+    pid = pid or os.getppid()
+    while pid > 1 and len(pids) < depth:
+        pids.append(pid)
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                stat = f.read()
+            pid = int(stat[stat.rindex(")") + 2:].split()[1])   # the name can hold spaces
+        except (OSError, ValueError, IndexError):
+            break
+    return pids
+
+
 def hook_message(d):
     """what the hook sends to the daemon: one json line, the daemon keeps per session state"""
     return json.dumps({
@@ -302,6 +325,8 @@ def hook_message(d):
         "proj": project(d.get("cwd")),
         "tool": clean(tool_look(d), 24) if d.get("tool_name") else "",
         "slash": clean(slash(d), 24) if slash(d) else "",
+        "mode": clean(d["permission_mode"], 24) if d.get("permission_mode") else "",
+        "pids": parent_pids(),
     })
 
 
@@ -573,6 +598,8 @@ class Session:
         self.busy = False   # between a prompt and Stop
         self.tool = ""      # tool running now, "" = thinking
         self.proj = ""
+        self.mode = ""      # permission mode, "" = not heard yet
+        self.pids = []      # claude and its parent processes, closest first
 
 
 class State:
@@ -652,6 +679,20 @@ class State:
             self.usage_sent = now
         self.out(line)
 
+    def on_mode(self, s, mode):
+        """the pet shows the mode for a moment when it changes, or when a session starts
+        in a mode other than normal"""
+        if not mode or mode == s.mode:
+            return
+        old, s.mode = s.mode, mode
+        if old or mode != "default":
+            self.out("mode " + MODES.get(mode, mode)[:16])
+
+    def waiting(self):
+        """sessions waiting for you, newest first"""
+        w = [(s.perm, sid) for sid, s in self.sessions.items() if s.perm]
+        return [self.sessions[sid] for _, sid in sorted(w, reverse=True)]
+
     def hook(self, m, now=None):
         now = now or time.time()
         self.on_hook(m, now)
@@ -692,6 +733,10 @@ class State:
         s.seen = now
         if m.get("proj"):
             s.proj = str(m["proj"])[:16]
+        pids = m.get("pids")
+        if isinstance(pids, list) and pids and all(isinstance(p, int) for p in pids):
+            s.pids = pids[:12]
+        self.on_mode(s, str(m.get("mode") or ""))
 
         if ev == "SubagentStart" and aid and aid not in s.gone:
             s.subs.add(aid)
@@ -1318,14 +1363,181 @@ class Keys:
             time.sleep(self.TICK)
 
 
+# ---------------------------------------------------------------- focus
+#
+# a tap while a session waits for you brings its terminal to the front. the hooks send
+# the pids of claude and its parents, we look for a window owned by one of them.
+# kde (wayland or x11): a short kwin script over dbus, konsole also switches to the tab.
+# other x11 desktops: xdotool. anything else: the tap is just a tap.
+
+KWIN_SCRIPT = """
+const pids = %s, title = %s;
+const list = workspace.windowList ? workspace.windowList() : workspace.clientList();
+let best = null, rank = 1e9;
+for (const w of list) {
+    const i = pids.indexOf(w.pid);
+    if (i < 0) continue;
+    const r = i * 2 + (title && !w.caption.startsWith(title) ? 1 : 0);
+    if (r < rank) { best = w; rank = r; }
+}
+if (best) {
+    if (best.minimized) best.minimized = false;
+    if (workspace.windowList) workspace.activeWindow = best; else workspace.activeClient = best;
+}
+"""
+
+
+def gdbus(dest, path, method, *args, run=subprocess.run):
+    """one dbus call on the session bus, the reply as python values, None on any error"""
+    try:
+        p = run(["gdbus", "call", "--session", "--dest", dest, "--object-path", path,
+                 "--method", method] + [str(a) for a in args],
+                capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0:
+        return None
+    out = re.sub(r"(?:\b(?:u?int(?:16|32|64)|byte)|@\w+) ", "", p.stdout.strip())
+    try:
+        return ast.literal_eval(out)
+    except (ValueError, SyntaxError):
+        return None
+
+
+def konsole_tab(pids, call=gdbus):
+    """switches konsole to the tab running one of these pids. returns the tab title, or ""
+    when this is not konsole"""
+    for pid in pids:
+        dest = "org.kde.konsole-%d" % pid
+        windows = konsole_windows(dest, call)
+        for win in windows:
+            r = call(dest, "/Windows/" + win, "org.kde.konsole.Window.sessionList")
+            for sess in (r[0] if r else []):
+                r = call(dest, "/Sessions/" + str(sess), "org.kde.konsole.Session.processId")
+                if r and r[0] in pids:
+                    call(dest, "/Windows/" + win, "org.kde.konsole.Window.setCurrentSession", sess)
+                    t = call(dest, "/Sessions/" + str(sess), "org.kde.konsole.Session.title", 1)
+                    return t[0] if t else ""
+    return ""
+
+
+def konsole_windows(dest, call=gdbus):
+    r = call(dest, "/Windows", "org.freedesktop.DBus.Introspectable.Introspect")
+    if not r:
+        return []
+    return re.findall(r'<node name="(\d+)"', r[0])
+
+
+def kwin_focus(pids, title="", call=gdbus):
+    """runs a one-off kwin script that activates the window. False when kwin is not there"""
+    name = "tinyclawd-focus"
+    fd, path = tempfile.mkstemp(prefix="tinyclawd-", suffix=".js")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(KWIN_SCRIPT % (json.dumps(pids), json.dumps(title)))
+        call("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.unloadScript", name)
+        r = call("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.loadScript", path, name)
+        if not r or not isinstance(r[0], int) or r[0] < 0:
+            return False
+        ok = call("org.kde.KWin", "/Scripting/Script%d" % r[0], "org.kde.kwin.Script.run") is not None
+        time.sleep(0.3)   # let it run before it goes
+        call("org.kde.KWin", "/Scripting", "org.kde.kwin.Scripting.unloadScript", name)
+        return ok
+    finally:
+        os.unlink(path)
+
+
+def xdotool_focus(pids, run=subprocess.run):
+    for pid in pids:
+        try:
+            p = run(["xdotool", "search", "--pid", str(pid)], capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        wins = p.stdout.split()
+        if wins:
+            run(["xdotool", "windowactivate", wins[-1]], capture_output=True, timeout=3)
+            return True
+    return False
+
+
+def focus_terminal(pids):
+    """brings the window running these pids to the front. returns how, or None"""
+    title = konsole_tab(pids)
+    if kwin_focus(pids, title):
+        return "kwin"
+    if os.environ.get("DISPLAY") and shutil.which("xdotool") and xdotool_focus(pids):
+        return "xdotool"
+    return None
+
+
+# ---------------------------------------------------------------- away
+#
+# the screen is locked: the pet goes to sleep, and wakes up when you are back.
+# asks logind for the graphical session's LockedHint (kde, gnome and friends set it).
+# off with TINYCLAWD_NO_AWAY=1.
+
+def loginctl(*args, run=subprocess.run):
+    try:
+        p = run(["loginctl"] + list(args), capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return p.stdout.strip() if p.returncode == 0 else None
+
+
+class Away:
+    EVERY = 2.0
+
+    def __init__(self, out, ask=loginctl):
+        self.out = out
+        self.ask = ask
+        self.sid = None
+        self.away = False
+        self.stop = False
+
+    def locked(self):
+        """True / False, None when logind can't tell"""
+        if not self.sid:
+            self.sid = self.ask("show-user", str(os.getuid()), "-p", "Display", "--value")
+            if not self.sid:
+                return None
+        v = self.ask("show-session", self.sid, "-p", "LockedHint", "--value")
+        if v not in ("yes", "no"):
+            self.sid = None   # logged out and in again: a new session next time
+            return None
+        return v == "yes"
+
+    def tick(self):
+        v = self.locked()
+        if v is not None and v != self.away:
+            self.away = v
+            self.out("away %d" % v)
+
+    def loop(self):
+        if os.environ.get("TINYCLAWD_NO_AWAY", "") not in ("", "0"):
+            log("screen lock watch off: TINYCLAWD_NO_AWAY is set")
+            return
+        if not shutil.which("loginctl"):
+            log("no loginctl, the pet does not know when the screen is locked")
+            return
+        while not self.stop:
+            try:
+                self.tick()
+            except Exception as e:
+                log("away:", e)
+            time.sleep(self.EVERY)
+
+
 # ---------------------------------------------------------------- daemon
 
 DEVICE_PREFIXES = ("ok", "err", "touch", "boot")
+FOCUS_CMD = "@focus"   # from `tinyclawd.py focus`, does what a tap does
 
 
 class Daemon:
+    FOCUS_CYCLE = 15.0   # another tap this soon goes to the next waiting session
+
     def __init__(self, port=None, stdout=False, path=None, player=playerctl, keys=None,
-                 no_keys=False, audio=None):
+                 no_keys=False, audio=None, focus=focus_terminal):
         self.path = path or sock_path()
         self.link = Link(port, stdout, self.on_connect, self.on_device)
         self.state = State(self.link.send)
@@ -1333,6 +1545,9 @@ class Daemon:
         self.music = Music(self.link.send, player, self.eq)
         self.keys = Keys(self.link.send, keys)
         self.keys.off = no_keys
+        self.away = Away(self.link.send)
+        self.focus = focus
+        self.focused = (0.0, 0)   # when, and which of the waiting sessions
         self.last_time = 0.0
 
     def on_connect(self):
@@ -1350,6 +1565,8 @@ class Daemon:
             self.link.send(self.music.line)
         if self.keys.rate:
             self.link.send("typing %d" % self.keys.rate)
+        if self.away.away:
+            self.link.send("away 1")
 
     def send_time(self):
         self.last_time = time.time()
@@ -1361,11 +1578,34 @@ class Daemon:
             return   # esp-idf logs share the port
         if word == "touch":
             log("pet:", line)
+            if line == "touch tap":
+                self.focus_waiting()
         elif word == "boot":
             log("pet rebooted:", line)
             self.on_connect()
         elif word == "err" or line.startswith("ok tinyclawd"):
             log("pet:", line)
+
+    def focus_waiting(self, now=None):
+        """a tap while sessions wait: their terminal comes to the front. tapping again
+        soon after goes to the next one"""
+        now = now or time.time()
+        waiting = [s for s in self.state.waiting() if s.pids]
+        if not waiting or not self.focus:
+            return
+        when, i = self.focused
+        i = i + 1 if now - when < self.FOCUS_CYCLE else 0
+        self.focused = (now, i)
+        s = waiting[i % len(waiting)]
+        threading.Thread(target=self.run_focus, args=(s.pids, s.proj), daemon=True).start()
+
+    def run_focus(self, pids, proj):
+        try:
+            how = self.focus(pids)
+        except Exception as e:
+            how = None
+            log("focus:", e)
+        log("tap: %s %s" % ("showing" if how else "no window found for", proj or "the session"))
 
     def handle_client(self, conn):
         conn.settimeout(0.5)
@@ -1385,7 +1625,9 @@ class Daemon:
             if not raw:
                 continue
             try:
-                if raw.startswith("{"):
+                if raw == FOCUS_CMD:
+                    self.focus_waiting()
+                elif raw.startswith("{"):
                     m = json.loads(raw)
                     if isinstance(m, dict):
                         self.state.hook(m)
@@ -1420,6 +1662,7 @@ class Daemon:
         t.start()
         threading.Thread(target=self.music.loop, daemon=True).start()
         threading.Thread(target=self.keys.loop, daemon=True).start()
+        threading.Thread(target=self.away.loop, daemon=True).start()
         try:
             while until is None or not until.is_set():
                 r, _, _ = select.select([srv], [], [], 1.0)
@@ -1439,6 +1682,7 @@ class Daemon:
             self.link.stop = True
             self.music.stop = True
             self.keys.stop = True
+            self.away.stop = True
             self.eq.stop()
             srv.close()
             try:
@@ -1617,6 +1861,106 @@ def cmd_send(args):
     return 0
 
 
+# ---------------------------------------------------------------- flash (rp2040)
+#
+# the xiao rp2040 takes a .uf2 file: open its port at 1200 baud and it reboots into the
+# RPI-RP2 drive, copy the file there and it reboots into the new firmware. no button,
+# no root: the drive is mounted through udisks like any usb stick.
+
+UF2_MAGIC = b"UF2\n"
+BOOT_LABEL = "RPI-RP2"
+
+
+def boot_drive():
+    """the RPI-RP2 partition's device, or None"""
+    p = "/dev/disk/by-label/" + BOOT_LABEL
+    return os.path.realpath(p) if os.path.exists(p) else None
+
+
+def mount_of(dev):
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                part = line.split()
+                if part[0] == dev:
+                    return part[1].replace("\\040", " ")
+    except OSError:
+        pass
+    return None
+
+
+def wait_for(fn, secs, step=0.25):
+    end = time.time() + secs
+    while True:
+        v = fn()
+        if v or time.time() >= end:
+            return v
+        time.sleep(step)
+
+
+def mount_boot_drive(dev):
+    mp = wait_for(lambda: mount_of(dev), 2)   # a desktop may mount it on its own
+    if mp:
+        return mp
+    try:
+        p = subprocess.run(["udisksctl", "mount", "-b", dev, "--no-user-interaction"],
+                           capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError("could not mount %s (%s). mount it, then run this again" % (dev, e))
+    if p.returncode != 0:
+        raise RuntimeError("could not mount %s: %s" % (dev, (p.stderr or p.stdout).strip()))
+    return mount_of(dev) or p.stdout.strip().rsplit(" at ", 1)[-1].rstrip(".")
+
+
+def flash_uf2(path, port=None, say=print):
+    with open(path, "rb") as f:
+        if f.read(4) != UF2_MAGIC:
+            raise RuntimeError("%s is not a .uf2 file" % path)
+    dev = boot_drive()
+    if not dev:
+        port = port or find_port()
+        if not port:
+            raise RuntimeError("no tiny clawd found. plug it in, or hold B while plugging it in")
+        say("rebooting the board on %s into its usb drive" % port)
+        import serial
+        try:
+            serial.Serial(port, 1200).close()
+        except (serial.SerialException, OSError):
+            pass   # it often drops off the bus while closing, that is the point
+        dev = wait_for(boot_drive, 10)
+        if not dev:
+            raise RuntimeError("the board did not show up as %s. hold B while plugging it in, "
+                               "then run this again" % BOOT_LABEL)
+    mp = mount_boot_drive(dev)
+    if not os.path.exists(os.path.join(mp, "INFO_UF2.TXT")):
+        raise RuntimeError("%s does not look like an rp2040 drive" % mp)
+    say("copying %s to %s" % (os.path.basename(path), mp))
+    with open(path, "rb") as src, open(os.path.join(mp, "tinyclawd.uf2"), "wb") as dst:
+        shutil.copyfileobj(src, dst)
+        dst.flush()
+        os.fsync(dst.fileno())
+    if not wait_for(lambda: find_port(), 15):
+        raise RuntimeError("copied, but the pet did not come back. unplug it and plug it in again")
+    say("flashed, the pet is back")
+
+
+def cmd_flash(args):
+    try:
+        flash_uf2(args.file, args.port)
+    except (OSError, RuntimeError) as e:
+        log(e)
+        return 1
+    return 0
+
+
+def cmd_focus(args):
+    # for a keyboard shortcut: the terminal of the session waiting for you comes to the front
+    if not send_to_daemon(FOCUS_CMD, path=args.sock):
+        log("daemon not running (%s)" % (args.sock or sock_path()))
+        return 1
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="tinyclawd", description="tiny clawd laptop bridge")
     p.add_argument("--sock", help="unix socket (default %s)" % sock_path())
@@ -1636,6 +1980,14 @@ def main(argv=None):
     s = sub.add_parser("send", help="send one raw protocol line")
     s.add_argument("line", nargs="+")
     s.set_defaults(fn=cmd_send)
+
+    f = sub.add_parser("flash", help="flash a .uf2 onto the xiao rp2040 build, no button needed")
+    f.add_argument("file", help="tinyclawd .uf2 file")
+    f.add_argument("--port", help="serial port (default: the pet's)")
+    f.set_defaults(fn=cmd_flash)
+
+    sub.add_parser("focus", help="show the terminal of the session waiting for you (like a tap)") \
+        .set_defaults(fn=cmd_focus)
 
     c = sub.add_parser("console", help="type lines to the pet, print its answers")
     c.add_argument("--port")

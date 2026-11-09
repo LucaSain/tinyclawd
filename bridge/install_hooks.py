@@ -30,6 +30,7 @@ show my usage on tiny clawd
 EVENTS = {
     "SessionStart": None, "SessionEnd": None, "UserPromptSubmit": None,
     "PreToolUse": "*", "PostToolUse": "*", "PostToolUseFailure": "*", "PermissionRequest": "*",
+    "PermissionDenied": "*",
     "Notification": None, "Stop": None, "StopFailure": None,
     "SubagentStart": None, "SubagentStop": None, "PreCompact": None,
 }

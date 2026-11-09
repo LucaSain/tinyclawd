@@ -37,7 +37,8 @@ firmware, frame by frame.
 | web search / fetch | spinning globe |
 | subagents | a squad of mini Clawds passing a ball |
 | permission or question | surprised, then the screen flashes with the project name until you answer |
-| tool error | surprised, or explaining the bug to a rubber duck |
+| tool error, or auto mode said no | surprised, or explaining the bug to a rubber duck |
+| permission mode changed (shift+tab) | a small tab at the top: PLAN MODE, AUTO MODE... for 2.5 s |
 | test passed | goal, header, bicycle kick, a squashed bug |
 | test failed | yellow card, then red card |
 | commit | a branch merging, party, knee slide, trophy |
@@ -46,8 +47,9 @@ firmware, frame by frame.
 | usage running low | tired, stoppage time, limit hit |
 | music playing (spotify, youtube...) | now playing with the song name, three full screen visualizers, headbanging |
 | you typing | it watches the keys go down |
+| screen locked | falls asleep, wakes up when you are back |
 | nothing going on | looks around, coffee, juggling, football, naps and dreams |
-| touch the head | tap: petted (sometimes shy or a wink), double tap: usage, hold: love |
+| touch the head | tap: petted (sometimes shy or a wink), double tap: usage, hold: love. a tap while a session waits for you also brings its terminal to the front |
 
 ## animations
 
@@ -256,7 +258,9 @@ network code and there are no accounts.
 - music: the song name comes from `playerctl`. the equalizer levels are worked out on the laptop
   from what it is playing, the sound itself is never stored or sent. off with `TINYCLAWD_NO_EQ=1`
 - claude code: the pet gets the event, the tool name (for Bash only the kind, like build or test),
-  the project folder name and your usage percentages. never your prompts or code
+  the project folder name, the permission mode and your usage percentages. never your prompts or
+  code. the daemon also gets the process ids of claude and its terminal, to find the window
+- screen lock: the daemon asks logind whether the screen is locked. off with `TINYCLAWD_NO_AWAY=1`
 
 ## try it without the board
 

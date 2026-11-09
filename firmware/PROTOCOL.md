@@ -34,6 +34,8 @@ connected it just lives on its own.
 | `typing <n>` | you are typing on the laptop, n = keys per second (1-15). `typing 0` = stopped. sent when it changes, and again every 5 s while it goes on. only a count, never which keys |
 | `eq 13579753` | music levels, 8 digits 0-9, bass on the left. only while music plays, up to ~12 a second and only when they changed. the laptop sends levels, never sound. no `eq` for 500 ms and the pet makes up its own bars |
 | `time 23:15` | local time, so it knows when it is night (23:00 to 7:00) |
+| `away 1` / `away 0` | the laptop screen is locked / unlocked. away: it falls asleep once nothing else plays and stays asleep (songs do not wake it), claude events still show. back: it wakes up |
+| `mode <label>` | the permission mode changed, e.g. `mode plan mode`. shown upper case in a small tab at the top for 2.5 s, up to 16 chars. empty = hide it |
 | `touch tap` / `touch double` / `touch long` | fake a touch (testing). a double tap always shows the usage screen |
 | `touch down` / `touch up` | fake the pad edges, hold to open the menu (testing) |
 | `play <anim>` | play one animation now (testing) |

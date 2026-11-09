@@ -18,8 +18,9 @@ if [ -z "$BASH_VERSION" ]; then
     exit 1
 fi
 
-REPO=${TINYCLAWD_REPO:-https://github.com/deepakpopli/tinyclawd}
-API=https://api.github.com/repos/deepakpopli/tinyclawd/releases/latest
+GH=LucaSain/tinyclawd   # code and firmware releases (the esp32c3 .bin and the rp2040 .uf2)
+REPO=${TINYCLAWD_REPO:-https://github.com/$GH}
+API=https://api.github.com/repos/$GH/releases/latest
 WEB_FLASHER=https://espressif.github.io/esptool-js/
 DIR=${TINYCLAWD_DIR:-$HOME/.tinyclawd}
 
@@ -171,10 +172,21 @@ get_esptool() {
     return 1
 }
 
+# which board: esp32c3 or rp2040 (the xiao build, or one waiting as the RPI-RP2 drive)
+board_kind() {
+    local p
+    for p in /dev/serial/by-id/usb-tinyclawd_*; do
+        [ -e "$p" ] && { echo rp2040; return; }
+    done
+    if [ -n "$TINYCLAWD_PORT" ] || [ -n "$(find_port)" ]; then echo esp32c3; return; fi
+    [ -e /dev/disk/by-label/RPI-RP2 ] && echo rp2040
+}
+
 flash() {
-    local port url bin was_running=""
+    local port url bin kind was_running=""
+    kind=$(board_kind)
     port=$(find_port)
-    if [ -z "$port" ]; then
+    if [ -z "$kind" ]; then
         say "no board found. to flash it later: plug it in and run this again"
         note "(or use the web flasher: $WEB_FLASHER)"
         return
@@ -182,17 +194,28 @@ flash() {
     case "${TINYCLAWD_FLASH:-ask}" in
         no|0) return ;;
         yes|1) ;;
-        *) ask "flash the latest tiny clawd firmware to the board on $port? (replaces what is on it, saved settings and best scores reset)" || return ;;
+        *) if [ "$kind" = rp2040 ]; then
+               ask "flash the latest tiny clawd firmware to the xiao rp2040${port:+ on $port}? (replaces what is on it, saved settings stay)" || return
+           else
+               ask "flash the latest tiny clawd firmware to the board on $port? (replaces what is on it, saved settings and best scores reset)" || return
+           fi ;;
     esac
     SG=""
-    serial_access "$port" || { note "skipping the flash"; return; }
-    get_esptool || { say "no esptool, skipping the flash. the web flasher works too: $WEB_FLASHER"; return; }
-    url=$(curl -fsSL "$API" 2>/dev/null | grep -o '"browser_download_url": *"[^"]*\.bin"' | head -1 | cut -d'"' -f4)
+    local ext=bin
+    if [ "$kind" = rp2040 ]; then
+        ext=uf2
+        [ -z "$port" ] || serial_access "$port" || { note "skipping the flash"; return; }
+        has_py serial || { say "flashing needs pyserial, skipping the flash"; return; }
+    else
+        serial_access "$port" || { note "skipping the flash"; return; }
+        get_esptool || { say "no esptool, skipping the flash. the web flasher works too: $WEB_FLASHER"; return; }
+    fi
+    url=$(curl -fsSL "$API" 2>/dev/null | grep -o '"browser_download_url": *"[^"]*'"$kind"'[^"]*\.'"$ext"'"' | head -1 | cut -d'"' -f4)
     if [ -z "$url" ]; then
-        say "could not find a firmware .bin in the latest github release, skipping the flash"
+        say "could not find a $kind .$ext in the latest github release, skipping the flash"
         return
     fi
-    bin=$(mktemp --suffix=.bin)
+    bin=$(mktemp --suffix=.$ext)
     if ! curl -fsSL -o "$bin" "$url"; then
         rm -f "$bin"; say "download failed, skipping the flash"; return
     fi
@@ -202,11 +225,19 @@ flash() {
     fi
     say "flashing $(basename "$url")"
     local cmd=("${ESPTOOL[@]}" --chip esp32c3 -p "$port" write_flash 0x0 "$bin")
+    # the rp2040 reboots into its usb drive and takes the .uf2 there, no button needed
+    [ "$kind" = rp2040 ] && cmd=("$PY" "$DIR/bridge/tinyclawd.py" flash "$bin" ${port:+--port "$port"})
     if [ -n "$SG" ]; then
         sg "$SG" -c "$(printf '%q ' "${cmd[@]}")"
     else
         "${cmd[@]}"
-    fi && say "flashed" || say "flashing failed. try again, or use the web flasher: $WEB_FLASHER"
+    fi && say "flashed" || {
+        if [ "$kind" = rp2040 ]; then
+            say "flashing failed. try again, or hold B while plugging it in and copy the .uf2 from $url onto the RPI-RP2 drive"
+        else
+            say "flashing failed. try again, or use the web flasher: $WEB_FLASHER"
+        fi
+    }
     rm -f "$bin"
     [ -n "$was_running" ] && systemctl --user start tinyclawd-daemon
 }

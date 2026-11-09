@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -907,6 +908,199 @@ class FakePort(unittest.TestCase):
         tc.send_to_daemon("ev done", path=self.sock)
         self.expect("ev done")
         self.assertTrue(self.t.is_alive())
+
+
+class PermissionMode(unittest.TestCase):
+    def setUp(self):
+        self.out = []
+        self.st = tc.State(lambda l: self.out.append(l) if l.startswith("mode ") else None)
+
+    def ev(self, sid, mode, event="PreToolUse"):
+        self.st.hook({"sid": sid, "event": event, "lines": [], "ts": time.time(), "mode": mode})
+
+    def test_shown_on_change(self):
+        self.ev("a", "default")    # starts normal: nothing to say
+        self.ev("a", "default")
+        self.ev("a", "plan")
+        self.ev("a", "plan")
+        self.ev("a", "auto")
+        self.ev("a", "")           # older claude code: no mode, nothing changes
+        self.ev("a", "default")
+        self.assertEqual(self.out, ["mode plan mode", "mode auto mode", "mode normal mode"])
+
+    def test_session_starting_in_a_mode(self):
+        self.ev("a", "acceptEdits", "SessionStart")
+        self.ev("b", "default", "SessionStart")
+        self.ev("c", "someNewMode", "SessionStart")
+        self.assertEqual(self.out, ["mode accept edits", "mode someNewMode"])
+
+    def test_hook_message_carries_it(self):
+        m = json.loads(tc.hook_message(hook("UserPromptSubmit", permission_mode="plan", prompt="x")))
+        self.assertEqual(m["mode"], "plan")
+        self.assertEqual(json.loads(tc.hook_message(hook("Stop")))["mode"], "")
+
+    def test_denied_by_auto_mode(self):
+        d = hook("PermissionDenied", tool_name="Bash", tool_input={"command": "rm -rf x"})
+        self.assertEqual(tc.map_hook(d), ["ev toolfail Bash"])
+        self.assertIn("PermissionDenied", __import__("install_hooks").EVENTS)
+
+
+class Focus(unittest.TestCase):
+    def test_parent_pids(self):
+        pids = tc.parent_pids()
+        self.assertEqual(pids[0], os.getppid())
+        self.assertNotIn(1, pids)
+        self.assertEqual(tc.parent_pids(os.getpid(), depth=1), [os.getpid()])
+        self.assertEqual(tc.parent_pids(999999999), [999999999])   # gone: just itself
+        m = json.loads(tc.hook_message(hook("PreToolUse", tool_name="Read")))
+        self.assertEqual(m["pids"][0], os.getppid())
+
+    def daemon(self):
+        got = []
+        d = tc.Daemon(stdout=True, path="/tmp/tinyclawd-test-unused.sock", player=lambda: "",
+                      no_keys=True, focus=got.append)
+        d.run_focus = lambda pids, proj: got.append(pids)
+        return d, got
+
+    def wait(self, d, sid, pids, ts):
+        d.state.hook({"sid": sid, "event": "PermissionRequest", "lines": ["ev perm"], "ts": ts,
+                      "pids": pids, "proj": sid}, now=ts)
+
+    def test_tap_shows_the_waiting_terminal(self):
+        d, got = self.daemon()
+        orig = threading.Thread
+        threading.Thread = lambda target, args, daemon: types.SimpleNamespace(start=lambda: target(*args))
+        try:
+            d.on_device("touch tap")                 # nobody waits: just a tap
+            self.assertEqual(got, [])
+            self.wait(d, "a", [10, 9], 100.0)
+            self.wait(d, "b", [20, 19], 200.0)
+            d.on_device("touch double")              # only a single tap
+            self.assertEqual(got, [])
+            d.focus_waiting(now=1000.0)
+            d.focus_waiting(now=1005.0)              # soon after: the next one
+            d.focus_waiting(now=1010.0)
+            d.focus_waiting(now=2000.0)              # later: the newest again
+            self.assertEqual(got, [[20, 19], [10, 9], [20, 19], [20, 19]])
+            d.handle_client(FakeConn(tc.FOCUS_CMD.encode() + b"\n"))
+            self.assertEqual(len(got), 5)
+            d.state.hook({"sid": "a", "event": "PostToolUse", "lines": [], "ts": 300.0}, now=300.0)
+            d.state.hook({"sid": "b", "event": "PostToolUse", "lines": [], "ts": 300.0}, now=300.0)
+            d.on_device("touch tap")                 # answered: nothing to show
+            self.assertEqual(len(got), 5)
+        finally:
+            threading.Thread = orig
+
+    def test_konsole_tab(self):
+        calls = []
+
+        def call(dest, path, method, *args):
+            calls.append((dest, path, method.rsplit(".", 1)[-1]) + args)
+            if dest != "org.kde.konsole-30":
+                return None
+            if method.endswith("Introspect"):
+                return ('<node><node name="1"/><node name="3"/></node>',)
+            if method.endswith("sessionList"):
+                return (["1", "2"],) if path == "/Windows/1" else (["5"],)
+            if method.endswith("processId"):
+                return ({"/Sessions/1": 41, "/Sessions/2": 42, "/Sessions/5": 21}[path],)
+            if method.endswith("title"):
+                return ("~ : claude",)
+            return ()
+
+        self.assertEqual(tc.konsole_tab([22, 21, 30], call), "~ : claude")
+        self.assertIn(("org.kde.konsole-30", "/Windows/3", "setCurrentSession", "5"), calls)
+        self.assertEqual(tc.konsole_tab([7, 8], lambda *a: None), "")
+
+    def test_kwin_script(self):
+        calls = []
+
+        def call(dest, path, method, *args):
+            calls.append((path, method.rsplit(".", 1)[-1]))
+            if method.rsplit(".", 1)[-1] == "loadScript":
+                with open(args[0]) as f:
+                    calls.append(f.read())
+                return (4,)
+            return ()
+
+        self.assertTrue(tc.kwin_focus([21, 30], "~ : claude", call))
+        script = calls[2]
+        self.assertIn("[21, 30]", script)
+        self.assertIn('"~ : claude"', script)
+        self.assertIn(("/Scripting/Script4", "run"), calls)
+        self.assertFalse(tc.kwin_focus([1], "", lambda *a: None))   # no kwin
+
+    def test_gdbus_reply(self):
+        def fake(out, rc=0):
+            return lambda *a, **k: types.SimpleNamespace(returncode=rc, stdout=out)
+        self.assertEqual(tc.gdbus("d", "/p", "m", run=fake("(int32 5,)\n")), (5,))
+        self.assertEqual(tc.gdbus("d", "/p", "m", run=fake("(['1', '2'],)")), (["1", "2"],))
+        self.assertEqual(tc.gdbus("d", "/p", "m", run=fake("(@as [],)")), ([],))
+        self.assertIsNone(tc.gdbus("d", "/p", "m", run=fake("", 1)))
+        self.assertIsNone(tc.gdbus("d", "/p", "m", run=fake("(objectpath '/x',)")))
+
+
+class FakeConn:
+    def __init__(self, data):
+        self.data = data
+
+    def settimeout(self, t):
+        pass
+
+    def recv(self, n):
+        d, self.data = self.data, b""
+        return d
+
+    def close(self):
+        pass
+
+
+class AwayWatch(unittest.TestCase):
+    def test_lock_and_unlock(self):
+        out, answers = [], {"Display": "2", "LockedHint": "no"}
+
+        def ask(*args):
+            return answers.get(args[args.index("-p") + 1])
+
+        a = tc.Away(out.append, ask)
+        a.tick()
+        self.assertEqual(out, [])   # unlocked at start: nothing to say
+        answers["LockedHint"] = "yes"
+        a.tick()
+        a.tick()
+        answers["LockedHint"] = "no"
+        a.tick()
+        self.assertEqual(out, ["away 1", "away 0"])
+        answers["LockedHint"] = None   # logind can't tell: keep what we had, find the session again
+        a.tick()
+        self.assertIsNone(a.sid)
+        self.assertEqual(out, ["away 1", "away 0"])
+
+    def test_resent_on_connect(self):
+        d = tc.Daemon(stdout=True, path="/tmp/tinyclawd-test-unused.sock", player=lambda: "",
+                      no_keys=True)
+        sent = []
+        d.link.send = sent.append
+        d.on_connect()
+        self.assertNotIn("away 1", sent)
+        d.away.away = True
+        d.on_connect()
+        self.assertEqual(sent[-1], "away 1")
+
+
+class Flash(unittest.TestCase):
+    def test_only_uf2(self):
+        with tempfile.NamedTemporaryFile(suffix=".bin") as f:
+            f.write(b"\xe9\x03\x02\x20not a uf2")
+            f.flush()
+            with self.assertRaises(RuntimeError) as e:
+                tc.flash_uf2(f.name, say=lambda *a: None)
+            self.assertIn("not a .uf2", str(e.exception))
+
+    def test_mount_of(self):
+        self.assertEqual(tc.mount_of("/dev/definitely-not-there"), None)
+        root = next(l.split()[0] for l in open("/proc/mounts") if l.split()[1] == "/")
+        self.assertEqual(tc.mount_of(root), "/")
 
 
 if __name__ == "__main__":

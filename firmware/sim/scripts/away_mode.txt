@@ -1,0 +1,13 @@
+# permission mode labels, then the screen locks and unlocks
+0 hello 1
+0 time 14:30
+1000 ev start
+1000 mode auto mode
+5000 ev prompt
+5200 mode plan mode
+8000 ev tool Read
+11000 ev done
+16000 away 1
+26000 music 1 Some Band - A Song
+30000 away 0
+36000 mode accept edits

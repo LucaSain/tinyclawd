@@ -1,5 +1,14 @@
 # changelog
 
+## unreleased
+
+- the xiao rp2040 build flashes from the bridge (`tinyclawd.py flash`) and from `install.sh`,
+  no button needed. github actions builds both firmwares and attaches them to tagged releases
+- the pet falls asleep while the laptop screen is locked and wakes up when you are back
+- a tap while a session waits for you brings its terminal to the front (kde: konsole tab too,
+  x11: xdotool). `tinyclawd.py focus` does the same from a keyboard shortcut
+- permission mode changes show as a small tab at the top. auto mode denials count as a tool error
+
 ## v1.0.0 (2026-10-17)
 
 first public version.
