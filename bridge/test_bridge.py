@@ -565,14 +565,37 @@ class Typing(unittest.TestCase):
 
     def test_turned_off(self):
         self.assertIsNone(self.k.why_off())
-        for env in ({"DISPLAY": ":1", "TINYCLAWD_NO_KEYS": "1"}, {},
-                    {"DISPLAY": ":1", "XDG_SESSION_TYPE": "wayland"}):
-            k = tc.Keys(self.out.append, source=lambda f: self.fail("ran"), env=env)
-            self.assertTrue(k.why_off())
-            k.loop()   # returns right away
+        k = tc.Keys(self.out.append, source=lambda f: self.fail("ran"),
+                    env={"DISPLAY": ":1", "TINYCLAWD_NO_KEYS": "1"})
+        self.assertTrue(k.why_off())
+        k.loop()   # returns right away
         d = tc.Daemon(stdout=True, path="/tmp/tinyclawd-test-unused.sock", player=lambda: "",
                       no_keys=True)
         self.assertTrue(d.keys.why_off())
+        self.assertEqual(self.out, [])
+
+    def picked(self, env, evdev, xinput):
+        k = tc.Keys(self.out.append, env=env)
+        k.can_evdev = lambda: evdev
+        k.has_xinput = lambda: xinput
+        try:
+            return k.pick()
+        except tc.NoKeys as e:
+            return str(e)
+
+    def test_pick_source(self):
+        x11 = {"DISPLAY": ":1", "XDG_SESSION_TYPE": "x11"}
+        wayland = {"DISPLAY": ":1", "XDG_SESSION_TYPE": "wayland", "WAYLAND_DISPLAY": "wayland-0"}
+        for env in (x11, wayland, {}):
+            self.assertIs(self.picked(env, True, True), tc.evdev_keys)
+        self.assertIs(self.picked(x11, False, True), tc.xinput_keys)
+        for env in (wayland, {}):
+            self.assertIn("input group", self.picked(env, False, True))
+        self.assertIn("xinput not found", self.picked(x11, False, False))
+        k = tc.Keys(self.out.append, env=wayland)
+        k.can_evdev = lambda: False
+        k.loop()   # off, returns right away
+        self.assertIsNone(k.source)
         self.assertEqual(self.out, [])
 
     def test_display_from_the_session(self):
@@ -581,7 +604,7 @@ class Typing(unittest.TestCase):
         k = tc.Keys(self.out.append, source=None, env=env)
         k.find_session = lambda e: e.update(DISPLAY=":1")
         k.wait_for_display()
-        self.assertIsNone(k.why_off())
+        self.assertEqual(env.get("DISPLAY"), ":1")
 
     def test_missing_xinput(self):
         def gone(on_press):
@@ -611,6 +634,70 @@ class Typing(unittest.TestCase):
         finally:
             os.environ["PATH"] = old
         self.assertEqual(len(got), 2)
+
+
+def fake_input(devices):
+    """a /sys/class/input and /dev/input in a temp dir. devices: {event name: (ev, key)}
+    capability strings like sysfs has them. the device nodes are fifos"""
+    root = tempfile.mkdtemp()
+    sys_dir, dev_dir = os.path.join(root, "sys"), os.path.join(root, "dev")
+    os.mkdir(dev_dir)
+    for name, (ev, key) in devices.items():
+        d = os.path.join(sys_dir, name, "device", "capabilities")
+        os.makedirs(d)
+        for f, v in (("ev", ev), ("key", key)):
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write(v + "\n")
+        os.mkfifo(os.path.join(dev_dir, name))
+    return sys_dir, dev_dir
+
+
+# real masks: a laptop keyboard, a mouse, a power button
+KEYBOARD = ("120013", "402000007 ff803078f810d001 feffffdfffcfffff fffffffffffffffe")
+MOUSE = ("17", "ffff0000 0 0 0 0")
+POWER = ("3", "10000000000000 0")
+
+
+class Evdev(unittest.TestCase):
+    def test_keyboards_only(self):
+        combo = (KEYBOARD[0], "10000 " + KEYBOARD[1])   # keys + BTN_LEFT
+        sys_dir, _ = fake_input({"event3": KEYBOARD, "event4": MOUSE, "event5": POWER,
+                                 "event6": combo, "mouse0": KEYBOARD})
+        self.assertEqual(tc.evdev_keyboards(sys_dir), ["event3"])
+        self.assertEqual(tc.evdev_keyboards(sys_dir + "-missing"), [])
+
+    def test_counts_key_downs(self):
+        sys_dir, dev_dir = fake_input({"event3": KEYBOARD})
+        # the test keeps a writer open, so the reader never sees the end of the fifo
+        w = os.open(os.path.join(dev_dir, "event3"), os.O_RDWR)
+        ev = tc.INPUT_EVENT
+        os.write(w, b"".join((
+            ev.pack(1, 0, 1, 30, 1),    # down
+            ev.pack(1, 0, 0, 0, 0),     # syn
+            ev.pack(1, 0, 1, 30, 2),    # repeat
+            ev.pack(1, 0, 1, 30, 0),    # up
+            ev.pack(1, 0, 4, 4, 30),    # msc scan
+            ev.pack(1, 0, 1, 48, 1),    # down
+        )))
+        got = []
+        start = time.time()
+        try:
+            tc.evdev_keys(lambda: got.append(1),
+                          stop=lambda: len(got) >= 2 or time.time() - start > 5,
+                          sys_dir=sys_dir, dev_dir=dev_dir)
+        finally:
+            os.close(w)
+        self.assertEqual(len(got), 2)
+        self.assertTrue(tc.evdev_readable(sys_dir, dev_dir))
+
+    @unittest.skipIf(os.geteuid() == 0, "root opens everything")
+    def test_no_access(self):
+        sys_dir, dev_dir = fake_input({"event3": KEYBOARD})
+        os.chmod(os.path.join(dev_dir, "event3"), 0)
+        self.assertFalse(tc.evdev_readable(sys_dir, dev_dir))
+        with self.assertRaises(tc.NoKeys) as e:
+            tc.evdev_keys(lambda: None, sys_dir=sys_dir, dev_dir=dev_dir)
+        self.assertIn("input group", str(e.exception))
 
 
 def tone(hz, amp=0.5, n=tc.EQ_BLOCK, start=0):

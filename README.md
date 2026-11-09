@@ -223,8 +223,12 @@ without them that feature just stays off:
 |---|---|
 | `playerctl` | the song name in music mode |
 | `pulseaudio-utils` (`parec`) | the equalizer from what the laptop plays |
-| `xinput` | typing reactions (X11 only) |
+| `xinput` | typing reactions on X11 (not needed if you are in the `input` group) |
 | `python3-numpy` | a nicer equalizer |
+
+typing reactions on Wayland read the keyboard from `/dev/input`, so they need the `input` group
+(`sudo usermod -aG input $USER`, then log out and in). that group lets every program you run read
+the keyboard, skip it if you don't want that.
 
 </details>
 
@@ -246,9 +250,9 @@ cooldowns, so it rarely does the same thing twice in a row. at night it falls as
 nothing leaves the laptop except the short lines that go to the pet over USB. the daemon has no
 network code and there are no accounts.
 
-- typing: it counts key presses in every window (X11 only, off on Wayland). the key codes
-  come through the `xinput` pipe but are never parsed, kept or sent, only the keys per second
-  go to the pet. off with `TINYCLAWD_NO_KEYS=1`
+- typing: it counts key presses in every window, from the keyboards in `/dev/input` (Wayland,
+  X11, needs the `input` group) or from `xinput` (X11). the key codes are never read, kept or
+  sent, only the keys per second go to the pet. off with `TINYCLAWD_NO_KEYS=1`
 - music: the song name comes from `playerctl`. the equalizer levels are worked out on the laptop
   from what it is playing, the sound itself is never stored or sent. off with `TINYCLAWD_NO_EQ=1`
 - claude code: the pet gets the event, the tool name (for Bash only the kind, like build or test),
